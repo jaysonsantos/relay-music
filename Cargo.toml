@@ -14,7 +14,7 @@ lazy_static = {version = "1.4.0", features = ["spin_no_std"] }
 
 [dependencies.stm32f1xx-hal]
 version = "0.7.0"
-features = ["stm32f103", "rt"]
+features = ["stm32f103", "rt", "medium"]
 
 [dependencies.defmt]
 git = "https://github.com/knurling-rs/defmt"

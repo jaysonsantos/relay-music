@@ -1,110 +1,13 @@
 #![no_std]
 #![no_main]
 
-use panic_probe as _; // global logger
-
-use core::sync::atomic::{AtomicUsize, Ordering};
-
 use cortex_m_rt::entry;
 
-use stm32f1xx_hal::{pac, prelude::*, time::Hertz, timer::Timer};
+use stm32f1xx_hal::{pac, prelude::*, timer::Timer};
 
-use defmt::{info, Format};
-use defmt_rtt as _;
-use embedded_hal::digital::v2::OutputPin;
 use embedded_hal::timer::CountDown;
 
-#[defmt::timestamp]
-fn timestamp() -> u64 {
-    static COUNT: AtomicUsize = AtomicUsize::new(0);
-    // NOTE(no-CAS) `timestamps` runs with interrupts disabled
-    let n = COUNT.load(Ordering::Relaxed);
-    COUNT.store(n + 1, Ordering::Relaxed);
-    n as u64
-}
-
-/// Terminates the application and makes `probe-run` exit with exit-code = 0
-pub fn exit() -> ! {
-    loop {
-        cortex_m::asm::bkpt();
-    }
-}
-
-lazy_static::lazy_static! {
-    static ref C: Hertz = 262.hz();
-    static ref D: Hertz = 294.hz();
-    static ref E: Hertz = 330.hz();
-    static ref F: Hertz = 350.hz();
-    static ref G: Hertz = 393.hz();
-}
-#[derive(Format)]
-enum NotePlayerStatus {
-    Start,
-    Up,
-    Down,
-}
-
-struct NotePlayer<'a, O, C>
-where
-    O: OutputPin,
-    C: CountDown,
-{
-    notes: &'a [&'static Hertz],
-    pin: O,
-    timer: C,
-    current_note_idx: usize,
-    status: NotePlayerStatus,
-}
-
-impl<'a, O, C> NotePlayer<'a, O, C>
-where
-    O: OutputPin,
-    C: CountDown,
-{
-    pub fn new(notes: &'a [&'static Hertz], pin: O, timer: C) -> Self {
-        Self {
-            notes,
-            pin,
-            timer,
-            current_note_idx: 0,
-            status: NotePlayerStatus::Start,
-        }
-    }
-
-    pub fn tick(&mut self)
-    where
-        <C as CountDown>::Time: From<Hertz>,
-    {
-        match self.status {
-            NotePlayerStatus::Start => {
-                self.timer.start::<Hertz>(*self.get_current_note());
-                let _ = self.pin.set_high();
-                self.status = NotePlayerStatus::Up;
-            }
-            NotePlayerStatus::Up => {
-                if self.timer.wait().is_ok() {
-                    let _ = self.pin.set_low();
-                    self.status = NotePlayerStatus::Down;
-                }
-            }
-            NotePlayerStatus::Down => {
-                if self.timer.wait().is_ok() {
-                    let _ = self.pin.set_high();
-                    self.status = NotePlayerStatus::Up;
-                }
-            }
-        }
-    }
-
-    fn get_current_note(&self) -> &'a Hertz {
-        unsafe { self.notes.get_unchecked(self.current_note_idx) }
-    }
-
-    fn increment_note(&mut self) {
-        self.current_note_idx = (self.current_note_idx + 1) % self.notes.len();
-        self.status = NotePlayerStatus::Start;
-    }
-}
+use relay_music::{note_player::NotePlayer, songs::ode_to_joy};
 
 #[entry]
 fn main() -> ! {
@@ -128,26 +31,30 @@ fn main() -> ! {
 
     // Configure gpio B pin 12 as a push-pull output. The `crh` register is passed to the function
     // in order to configure the port. For pins 0-7, crl should be passed instead.
-    let relay = gpiob.pb12.into_push_pull_output(&mut gpiob.crh);
+    let channel1_relay = gpiob.pb12.into_push_pull_output(&mut gpiob.crh);
+    let channel2_relay = gpiob.pb13.into_push_pull_output(&mut gpiob.crh);
+    let channel3_relay = gpiob.pb14.into_push_pull_output(&mut gpiob.crh);
+    let channel4_relay = gpiob.pb15.into_push_pull_output(&mut gpiob.crh);
 
     // Configure the syst timer to trigger an update every second
-    let note_timer = Timer::tim1(dp.TIM1, &clocks, &mut rcc.apb2).start_count_down(1.hz());
-    let mut duration_timer = Timer::syst(cp.SYST, &clocks).start_count_down(2.hz());
+    // let button_timer = Timer::syst(cp.SYST, &clocks).start_count_down(1.hz());
+    let mut duration_timer = Timer::syst(cp.SYST, &clocks).start_count_down(9.hz());
+    let channel1_note_timer = Timer::tim1(dp.TIM1, &clocks, &mut rcc.apb2).start_count_down(1.hz());
+    let channel2_note_timer = Timer::tim2(dp.TIM2, &clocks, &mut rcc.apb1).start_count_down(1.hz());
+    let channel3_note_timer = Timer::tim3(dp.TIM3, &clocks, &mut rcc.apb1).start_count_down(1.hz());
+    let channel4_note_timer = Timer::tim4(dp.TIM4, &clocks, &mut rcc.apb1).start_count_down(1.hz());
 
-    let notes: &[&Hertz] = &[
-        &E, &E, &F, &G, &G, &F, &E, &D, &C, &C, &D, &E, &D, &D, &C, &C,
-    ];
-    let mut notes_player = NotePlayer::new(notes, relay, note_timer);
+    let (channel1_notes, channel2_notes, channel3_notes, channel4_notes) = ode_to_joy();
+    let mut channel1_player = NotePlayer::new(&channel1_notes, channel1_relay, channel1_note_timer);
+    let mut channel2_player = NotePlayer::new(&channel2_notes, channel2_relay, channel2_note_timer);
+    let mut channel3_player = NotePlayer::new(&channel3_notes, channel3_relay, channel3_note_timer);
+    let mut channel4_player = NotePlayer::new(&channel4_notes, channel4_relay, channel4_note_timer);
 
     loop {
-        info!(
-            "Playing {:u32} {:?}",
-            notes_player.get_current_note().0,
-            notes_player.status
-        );
-        while let Err(nb::Error::WouldBlock) = duration_timer.wait() {
-            notes_player.tick();
-        }
-        notes_player.increment_note();
+        let duration_timer_wrapped = duration_timer.wait().is_ok();
+        channel1_player.tick(duration_timer_wrapped);
+        channel2_player.tick(duration_timer_wrapped);
+        channel3_player.tick(duration_timer_wrapped);
+        channel4_player.tick(duration_timer_wrapped);
     }
 }
