@@ -1,4 +1,4 @@
-use stm32f1xx_hal::{prelude::*, time::Hertz};
+use stm32f1xx_hal::time::Hertz;
 
 use defmt::Format;
 
